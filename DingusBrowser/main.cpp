@@ -14,11 +14,21 @@ HWND g_hwnd = nullptr;
 HWND g_urlBar = nullptr;
 ComPtr<ICoreWebView2Controller> g_webViewController;
 ComPtr<ICoreWebView2> g_webView;
+WNDPROC g_originalUrlBarProc;
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 void InitializeWebView();
 void ResizeBrowser();
 void NavigateToUrl();
+
+LRESULT CALLBACK UrlBarProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+	if (uMsg == WM_KEYDOWN && wParam == VK_RETURN) {
+		NavigateToUrl();
+		return 0;
+	}
+	return CallWindowProc(g_originalUrlBarProc, hwnd, uMsg, wParam, lParam);
+}
+
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
 	const wchar_t CLASS_NAME[] = L"BrowserWindow";
@@ -55,6 +65,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		nullptr
 	);
 
+	g_originalUrlBarProc = (WNDPROC)SetWindowLongPtr(g_urlBar, GWLP_WNDPROC, (LONG_PTR)UrlBarProc);
+
 	if (g_hwnd == nullptr) {
 		return 0;
 	}
@@ -86,7 +98,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 		return 0;
 	
 	case WM_COMMAND:
-		if (HIWORD(wParam) == BN_CLICKED) {
+		if (HIWORD(wParam) == EN_KILLFOCUS && (HWND)lParam == g_urlBar) {
 			NavigateToUrl();
 		}
 		return 0;
@@ -126,34 +138,34 @@ void InitializeWebView() {
 }
 
 void ResizeBrowser() {
-	RECT bounds;
-	GetClientRect(g_hwnd, &bounds);
-
-	// Adjust URL bar size
-	SetWindowPos(g_urlBar, nullptr,
-		0, 0,
-		bounds.right, URL_BAR_HEIGHT,
-		SWP_NOZORDER);
-
-	// Adjust WebView size
-	g_webViewController->put_Bounds({
-		0,
-		URL_BAR_HEIGHT,
-		bounds.right,
-		bounds.bottom
-		});
+    RECT bounds;
+    GetClientRect(g_hwnd, &bounds);
+    
+    // Adjust URL bar size
+    SetWindowPos(g_urlBar, nullptr, 
+        0, 0, 
+        bounds.right, URL_BAR_HEIGHT,
+        SWP_NOZORDER);
+    
+    // Adjust WebView size
+    g_webViewController->put_Bounds({
+        0,
+        URL_BAR_HEIGHT,
+        bounds.right,
+        bounds.bottom
+    });
 }
 
 void NavigateToUrl() {
-	wchar_t url[1024];
-	GetWindowText(g_urlBar, url, 1024);
-
-	std::wstring urlStr(url);
-	if (urlStr.find(L"http://") != 0 && urlStr.find(L"https://") != 0) {
-		urlStr = L"https://" + urlStr;
-	}
-
-	if (g_webView) {
-		g_webView->Navigate(urlStr.c_str());
-	}
+    wchar_t url[1024];
+    GetWindowText(g_urlBar, url, 1024);
+    
+    std::wstring urlStr(url);
+    if (urlStr.find(L"http://") != 0 && urlStr.find(L"https://") != 0) {
+        urlStr = L"https://" + urlStr;
+    }
+    
+    if (g_webView) {
+        g_webView->Navigate(urlStr.c_str());
+    }
 }
