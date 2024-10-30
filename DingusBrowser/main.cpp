@@ -1,13 +1,16 @@
 #include <Windows.h>
 #include <windowsx.h>
 #include <wrl.h>
-#include "wil/com.h"
-#include "wil/resource.h"
+#include <wil/com.h>
+#include <wil/resource.h>
 #include <WebView2.h>
 #include <string>
 #include <vector>
 #include <CommCtrl.h>
 #include <map>
+
+#define UNICODE
+#define _UNICODE
 
 #pragma comment(lib, "comctl32.lib")
 
@@ -41,12 +44,19 @@ HWND g_urlBar = nullptr;
 HWND g_tabControl = nullptr;
 HWND g_toolbar = nullptr;
 
+struct WebViewEventTokens {
+	EventRegistrationToken navigationCompletedToken;
+	EventRegistrationToken titleChangedToken;
+};
+
 struct TabInfo {
 	ComPtr<ICoreWebView2Controller> controller;
 	ComPtr<ICoreWebView2> webView;
 	std::wstring title;
 	std::wstring url;
+	WebViewEventTokens tokens;
 };
+
 
 std::vector<TabInfo> g_tabs;
 int g_currentTab = -1;
@@ -67,6 +77,9 @@ void CloseTab(int index);
 void InitializeToolbar(HWND hwnd, HINSTANCE hInstance);
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+	HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+	if (FAILED(hr)) return 1;
+
 	INITCOMMONCONTROLSEX icex;
 	icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
 	icex.dwICC = ICC_TAB_CLASSES | ICC_BAR_CLASSES;
@@ -74,19 +87,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	const wchar_t CLASS_NAME[] = L"BrowserWindow";
 
-	WNDCLASS wc = {};
+	WNDCLASSW wc = {};
 	wc.lpfnWndProc = WindowProc;
 	wc.hInstance = hInstance;
-	wc.lpszClassName = (LPCSTR)CLASS_NAME;
+	wc.lpszClassName = CLASS_NAME;
 	wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
 	wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
 
-	RegisterClass(&wc);
+	RegisterClassW(&wc);
 
-	g_hwnd = CreateWindowEx(
+	g_hwnd = CreateWindowExW(
 		0,
-		(LPCSTR)CLASS_NAME,
-		"DINGUS BROWSER",
+		CLASS_NAME,
+		L"DINGUS BROWSER",
 		WS_OVERLAPPEDWINDOW,
 		CW_USEDEFAULT, CW_USEDEFAULT,
 		WINDOW_WIDTH, WINDOW_HEIGHT,
@@ -169,10 +182,12 @@ void CreateTab() {
 	g_tabs.push_back(newTab);
 
 	int tabIndex = g_tabs.size() - 1;
+	
+	wchar_t tabText[] = L"New Tab";
 
-	TCITEM tie;
+	TCITEMW tie = {0};
 	tie.mask = TCIF_TEXT;
-	tie.pszText = (LPSTR)L"New Tab";
+	tie.pszText = tabText;
 	TabCtrl_InsertItem(g_tabControl, tabIndex, &tie);
 
 	InitializeWebView(tabIndex);
@@ -207,7 +222,7 @@ void SaveBookmark() {
 	if (g_currentTab >= 0 && g_currentTab < g_tabs.size()) {
 		TabInfo& currentTab = g_tabs[g_currentTab];
 		g_bookmarks[currentTab.title] = currentTab.url;
-		MessageBox(g_hwnd, "Bookmark added!", "Success", MB_OK);
+		MessageBoxW(g_hwnd, L"Bookmark added!", L"Success", MB_OK);
 	}
 }
 
@@ -216,14 +231,19 @@ void ShowBookmarks() {
 	for (const auto& bookmark : g_bookmarks) {
 		bookmarksList += bookmark.first + L"\n" + bookmark.second + L"\n";
 	}
-	MessageBox(g_hwnd, (LPCSTR)bookmarksList.c_str(), "Bookmarks", MB_OK);
+	MessageBoxW(g_hwnd, bookmarksList.c_str(), L"Bookmarks", MB_OK);
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 	switch (uMsg) {
-	case WM_DESTROY:
+	case WM_DESTROY: {
+		while (!g_tabs.empty()) {
+			CloseTab(g_tabs.size() - 1);
+		}
+		CoUninitialize();
 		PostQuitMessage(0);
 		return 0;
+	}
 
 	case WM_SIZE:
 		if (g_currentTab >= 0 && g_currentTab < g_tabs.size()) {
@@ -306,8 +326,17 @@ void HandleMenuCommand(WPARAM wParam) {
 void CloseTab(int index) {
 	if (index < 0 || index >= g_tabs.size()) return;
 
-	TabCtrl_DeleteItem(g_tabControl, index);
+	// Remove event handlers before closing
+	if (g_tabs[index].webView) {
+		g_tabs[index].webView->remove_NavigationCompleted(g_tabs[index].tokens.navigationCompletedToken);
+		g_tabs[index].webView->remove_DocumentTitleChanged(g_tabs[index].tokens.titleChangedToken);
+	}
 
+	// Release WebView2 resources
+	g_tabs[index].webView = nullptr;
+	g_tabs[index].controller = nullptr;
+
+	TabCtrl_DeleteItem(g_tabControl, index);
 	g_tabs.erase(g_tabs.begin() + index);
 
 	if (g_tabs.empty()) {
@@ -321,73 +350,79 @@ void CloseTab(int index) {
 }
 
 void InitializeWebView(int tabIndex) {
-	// Create WebView environment using default settings
 	CreateCoreWebView2EnvironmentWithOptions(nullptr, nullptr, nullptr,
 		Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
 			[tabIndex](HRESULT result, ICoreWebView2Environment* env) -> HRESULT {
-				// Check if environment creation succeeded
 				if (FAILED(result)) {
-					MessageBox(g_hwnd, "Failed to create WebView2 environment", "Error", MB_OK);
+					MessageBoxW(g_hwnd, L"Failed to create WebView2 environment", L"Error", MB_OK);
 					return result;
 				}
 
-				// Create WebView controller
 				env->CreateCoreWebView2Controller(g_hwnd,
 					Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
 						[tabIndex](HRESULT result, ICoreWebView2Controller* controller) -> HRESULT {
 							if (FAILED(result)) {
-								MessageBox(g_hwnd, "Failed to create WebView2 controller", "Error", MB_OK);
+								MessageBoxW(g_hwnd, L"Failed to create WebView2 controller", L"Error", MB_OK);
 								return result;
 							}
 
-							// Store the controller
 							if (tabIndex >= 0 && tabIndex < g_tabs.size()) {
 								g_tabs[tabIndex].controller = controller;
-
-								// Get WebView2 from controller
 								controller->get_CoreWebView2(&g_tabs[tabIndex].webView);
 
 								if (g_tabs[tabIndex].webView) {
 									// Configure WebView settings
 									ICoreWebView2Settings* settings;
 									g_tabs[tabIndex].webView->get_Settings(&settings);
-									settings->put_IsScriptEnabled(TRUE);
-									settings->put_AreDefaultScriptDialogsEnabled(TRUE);
-									settings->put_IsWebMessageEnabled(TRUE);
+									if (settings) {
+										settings->put_IsScriptEnabled(TRUE);
+										settings->put_AreDefaultScriptDialogsEnabled(TRUE);
+										settings->put_IsWebMessageEnabled(TRUE);
+										settings->Release();  // Release after use
+									}
 
 									// Register navigation event handler
 									g_tabs[tabIndex].webView->add_NavigationCompleted(
 										Callback<ICoreWebView2NavigationCompletedEventHandler>(
 											[tabIndex](ICoreWebView2* sender, ICoreWebView2NavigationCompletedEventArgs* args) -> HRESULT {
-												// Update URL and title
-												LPWSTR url = new wchar_t[2048];
-												sender->get_Source(&url);
-												g_tabs[tabIndex].url = url;
-
-												// Update URL bar if this is the current tab
-												if (tabIndex == g_currentTab) {
-													SetWindowText(g_urlBar, (LPCSTR)url);
+												if (tabIndex >= 0 && tabIndex < g_tabs.size()) {
+													wil::unique_cotaskmem_string url;
+													sender->get_Source(&url);
+													if (url) {
+														g_tabs[tabIndex].url = url.get();
+														if (tabIndex == g_currentTab && g_urlBar) {
+															SetWindowTextW(g_urlBar, url.get());
+														}
+													}
 												}
-												delete[] url;
 												return S_OK;
-											}).Get(), nullptr);
+											}).Get(),
+												&g_tabs[tabIndex].tokens.navigationCompletedToken);
 
 									// Register document title changed event handler
 									g_tabs[tabIndex].webView->add_DocumentTitleChanged(
 										Callback<ICoreWebView2DocumentTitleChangedEventHandler>(
 											[tabIndex](ICoreWebView2* sender, IUnknown* args) -> HRESULT {
-												LPWSTR title = new wchar_t[256];
-												sender->get_DocumentTitle(&title);
-												g_tabs[tabIndex].title = title;
+												if (tabIndex >= 0 && tabIndex < g_tabs.size()) {
+													wil::unique_cotaskmem_string title;
+													sender->get_DocumentTitle(&title);
+													if (title) {
+														g_tabs[tabIndex].title = title.get();
 
-												// Update tab text
-												TCITEM tie;
-												tie.mask = TCIF_TEXT;
-												tie.pszText = (LPSTR)title;
-												TabCtrl_SetItem(g_tabControl, tabIndex, &tie);
-												delete[] title;
+														// Update tab text safely
+														TCITEMW tie = { 0 };
+														tie.mask = TCIF_TEXT;
+														tie.pszText = const_cast<LPWSTR>(g_tabs[tabIndex].title.c_str());
+														tie.cchTextMax = static_cast<int>(g_tabs[tabIndex].title.length());
+
+														if (IsWindow(g_tabControl)) {
+															TabCtrl_SetItem(g_tabControl, tabIndex, &tie);
+														}
+													}
+												}
 												return S_OK;
-											}).Get(), nullptr);
+											}).Get(),
+												&g_tabs[tabIndex].tokens.titleChangedToken);
 
 									// Position the WebView
 									RECT bounds;
@@ -403,6 +438,7 @@ void InitializeWebView(int tabIndex) {
 				return S_OK;
 			}).Get());
 }
+
 
 void ResizeBrowser() {
 	if (g_currentTab < 0 || g_currentTab >= g_tabs.size() || !g_tabs[g_currentTab].controller) {
@@ -441,10 +477,10 @@ void ResizeBrowser() {
 
 void InitializeControls(HWND hwnd, HINSTANCE hInstance) {
 	// Create URL bar
-	g_urlBar = CreateWindowEx(
+	g_urlBar = CreateWindowExW(
 		0,
-		"EDIT",
-		"",
+		L"EDIT",
+		L"",
 		WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
 		0, TOOLBAR_HEIGHT + TAB_HEIGHT,
 		WINDOW_WIDTH, URL_BAR_HEIGHT,
@@ -455,9 +491,9 @@ void InitializeControls(HWND hwnd, HINSTANCE hInstance) {
 	);
 
 	// Create tab control
-	g_tabControl = CreateWindowEx(
+	g_tabControl = CreateWindowExW(
 		0,
-		WC_TABCONTROL,
+		WC_TABCONTROLW, 
 		nullptr,
 		WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
 		0, TOOLBAR_HEIGHT,
