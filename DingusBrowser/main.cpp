@@ -8,10 +8,16 @@
 #include <vector>
 #include <CommCtrl.h>
 #include <map>
+#include <Uxtheme.h>
+#include <vssym32.h>
+#include <dwmapi.h>
+#include <gdiplus.h>
 
 #define UNICODE
 #define _UNICODE
 
+#pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "comctl32.lib")
 
 using namespace Microsoft::WRL;
@@ -39,10 +45,40 @@ constexpr int ID_BOOKMARKS_VIEW = 2005;
 constexpr int ID_TOOLS_DEVTOOLS = 2006;
 constexpr int ID_TOOLS_DOWNLOADS = 2007; 
 
+constexpr int ICON_SIZE = 20;
+constexpr COLORREF ICON_COLOR = RGB(95, 99, 104);
+constexpr COLORREF ICON_HOVER_COLOR = RGB(32, 33, 36);
+
 HWND g_hwnd = nullptr;
 HWND g_urlBar = nullptr;
 HWND g_tabControl = nullptr;
 HWND g_toolbar = nullptr;
+
+namespace Colors {
+	const COLORREF BackgroundColor = RGB(245, 246, 247);
+	const COLORREF AccentColor = RGB(66, 133, 244);
+	const COLORREF TextColor = RGB(32, 33, 36);
+	const COLORREF BorderColor = RGB(218, 220, 224);
+	const COLORREF HoverColor = RGB(241, 243, 244);
+	const COLORREF ActiveTabColor = RGB(255, 255, 255);
+	const COLORREF InactiveTabColor = RGB(241, 243, 244);
+}
+
+struct IconPath {
+	std::vector<Gdiplus::PointF> points;
+	std::vector<BYTE> types;
+};
+
+struct WindowStyle {
+	static void ApplyModernStyle(HWND hwnd) {
+		SetWindowTheme(hwnd, L"Explorer", nullptr);
+
+		DWMNCRENDERINGPOLICY policy = DWMNCRP_ENABLED;
+		DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
+
+		SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)CreateSolidBrush(Colors::BackgroundColor));
+	}
+};
 
 struct WebViewEventTokens {
 	EventRegistrationToken navigationCompletedToken;
@@ -62,6 +98,96 @@ std::vector<TabInfo> g_tabs;
 int g_currentTab = -1;
 std::map<std::wstring, std::wstring> g_bookmarks;
 
+std::map<int, IconPath> g_iconPaths;
+UINT_PTR g_toolbarHoverTimer = 0;
+int g_hoveredButton = -1;
+
+IconPath ParseSVGPath(const wchar_t* pathData) {
+	IconPath result;
+
+	// Simple SVG path parser for M, L, and Z commands
+	float currentX = 0, currentY = 0;
+	const wchar_t* p = pathData;
+
+	while (*p) {
+		while (iswspace(*p)) p++;
+
+		if (*p == 'M' || *p == 'm') {
+			bool relative = (*p == 'm');
+			p++;
+			float x = wcstof(p, const_cast<wchar_t**>(&p));
+			while (iswspace(*p) || *p == ',') p++;
+			float y = wcstof(p, const_cast<wchar_t**>(&p));
+
+			if (relative) {
+				x += currentX;
+				y += currentY;
+			}
+
+			result.points.push_back(Gdiplus::PointF(x, y));
+			result.types.push_back(Gdiplus::PathPointTypeStart);
+			currentX = x;
+			currentY = y;
+		}
+		else if (*p == 'L' || *p == 'l') {
+			bool relative = (*p == 'l');
+			p++;
+			float x = wcstof(p, const_cast<wchar_t**>(&p));
+			while (iswspace(*p) || *p == ',') p++;
+			float y = wcstof(p, const_cast<wchar_t**>(&p));
+
+			if (relative) {
+				x += currentX;
+				y += currentY;
+			}
+
+			result.points.push_back(Gdiplus::PointF(x, y));
+			result.types.push_back(Gdiplus::PathPointTypeLine);
+			currentX = x;
+			currentY = y;
+		}
+		else if (*p == 'Z' || *p == 'z') {
+			result.types.back() |= Gdiplus::PathPointTypeCloseSubpath;
+			p++;
+		}
+		else {
+			p++;
+		}
+	}
+
+	return result;
+}
+
+void InitializeIconPaths() {
+	g_iconPaths[ID_BACK] = ParseSVGPath(L"M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z");
+	g_iconPaths[ID_FORWARD] = ParseSVGPath(L"M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z");
+	g_iconPaths[ID_REFRESH] = ParseSVGPath(L"M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z");
+	g_iconPaths[ID_HOME] = ParseSVGPath(L"M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z");
+}
+
+void DrawIcon(HDC hdc, const IconPath& path, int x, int y, COLORREF color) {
+	Gdiplus::Graphics graphics(hdc);
+	graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+	// Scale the icon to fit our desired size
+	float scale = static_cast<float>(ICON_SIZE) / 24.0f;
+	Gdiplus::Matrix matrix;
+	matrix.Scale(scale, scale);
+	matrix.Translate(static_cast<float>(x), static_cast<float>(y));
+	graphics.SetTransform(&matrix);
+
+	// Create the path
+	Gdiplus::GraphicsPath iconPath;
+	iconPath.AddLines(reinterpret_cast<const Gdiplus::PointF*>(path.points.data()), static_cast<INT>(path.points.size()));
+
+	// Draw the icon
+	Gdiplus::SolidBrush brush(Gdiplus::Color(GetRValue(color),
+		GetGValue(color),
+		GetBValue(color)));
+	graphics.FillPath(&brush, &iconPath);
+}
+
+
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 void InitializeWebView(int tabIndex);
 void ResizeBrowser();
@@ -75,6 +201,9 @@ void ShowBookmarks();
 void SwitchToTab(int index);
 void CloseTab(int index);
 void InitializeToolbar(HWND hwnd, HINSTANCE hInstance);
+void DrawModernUrlBar(HWND hwnd);
+void DrawModerTab(HWND hwnd, HDC hdc, const RECT& rect, bool isSelected);
+void HandleUrlBarInput();
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
 	HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -129,12 +258,89 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	return 0;
 }
 
+void DrawModernUrlBar(HWND hwnd) {
+	RECT rect;
+	GetClientRect(hwnd, &rect);
+	HDC hdc = GetDC(hwnd);
+
+	// Create memory DC for double buffering
+	HDC memDC = CreateCompatibleDC(hdc);
+	HBITMAP memBitmap = CreateCompatibleBitmap(hdc, rect.right, rect.bottom);
+	HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, memBitmap);
+
+	// Fill background
+	HBRUSH bgBrush = CreateSolidBrush(RGB(255, 255, 255));
+	FillRect(memDC, &rect, bgBrush);
+	DeleteObject(bgBrush);
+
+	// Draw rounded rectangle border
+	int radius = 4;
+	HPEN borderPen = CreatePen(PS_SOLID, 1, Colors::BorderColor);
+	HGDIOBJ oldPen = SelectObject(memDC, borderPen);
+
+	// Draw the rounded rectangle
+	RoundRect(memDC, rect.left, rect.top, rect.right, rect.bottom, radius * 2, radius * 2);
+
+	// Draw the URL text
+	SetBkMode(memDC, TRANSPARENT);
+	RECT textRect = rect;
+	textRect.left += 8; // Text padding
+	textRect.right -= 8;
+
+	wchar_t text[2048];
+	GetWindowTextW(hwnd, text, 2048);
+	DrawTextW(memDC, text, -1, &textRect, DT_VCENTER | DT_SINGLELINE);
+
+	// Copy from memory DC to window DC
+	BitBlt(hdc, 0, 0, rect.right, rect.bottom, memDC, 0, 0, SRCCOPY);
+
+	// Clean up
+	SelectObject(memDC, oldPen);
+	SelectObject(memDC, oldBitmap);
+	DeleteObject(borderPen);
+	DeleteObject(memBitmap);
+	DeleteDC(memDC);
+	ReleaseDC(hwnd, hdc);
+}
+
+void DrawModerTab(HWND hwnd, HDC hdc, const RECT& rect, bool isSelected) {
+	HBRUSH hBrush = CreateSolidBrush(isSelected ? Colors::ActiveTabColor : Colors::InactiveTabColor);
+
+	FillRect(hdc, &rect, hBrush);
+	DeleteObject(hBrush);
+
+	if (!isSelected) {
+		HPEN hPen = CreatePen(PS_SOLID, 1, Colors::BorderColor);
+		SelectObject(hdc, hPen);
+		MoveToEx(hdc, rect.right - 1, rect.top + 4, nullptr);
+		LineTo(hdc, rect.right - 1, rect.bottom - 4);
+		DeleteObject(hPen);
+	}
+
+	if (isSelected) {
+		RECT borderRect = rect;
+		borderRect.top = borderRect.bottom - 2;
+		hBrush = CreateSolidBrush(Colors::AccentColor);
+		FillRect(hdc, &borderRect, hBrush);
+		DeleteObject(hBrush);
+	}
+}
+
 void InitializeToolbar(HWND hwnd, HINSTANCE hInstance) {
+	// Initialize GDI+
+	Gdiplus::GdiplusStartupInput gdiplusStartupInput;
+	ULONG_PTR gdiplusToken;
+	Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
+
+	// Initialize icon paths
+	InitializeIconPaths();
+
+	// Create toolbar with modern style
 	g_toolbar = CreateWindowEx(
 		0,
 		TOOLBARCLASSNAME,
 		nullptr,
-		WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | TBSTYLE_TOOLTIPS,
+		WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | TBSTYLE_TRANSPARENT | CCS_NODIVIDER | CCS_NORESIZE,
 		0, 0, 0, 0,
 		hwnd,
 		nullptr,
@@ -142,6 +348,11 @@ void InitializeToolbar(HWND hwnd, HINSTANCE hInstance) {
 		nullptr
 	);
 
+	// Set modern toolbar styles
+	SendMessage(g_toolbar, TB_SETEXTENDEDSTYLE, 0,
+		TBSTYLE_EX_MIXEDBUTTONS | TBSTYLE_EX_HIDECLIPPEDBUTTONS | TBSTYLE_EX_DRAWDDARROWS);
+
+	// Create buttons
 	TBBUTTON buttons[] = {
 		{0, ID_BACK, TBSTATE_ENABLED, BTNS_BUTTON, {0}, 0, (INT_PTR)L"Back"},
 		{1, ID_FORWARD, TBSTATE_ENABLED, BTNS_BUTTON, {0}, 0, (INT_PTR)L"Forward"},
@@ -151,30 +362,86 @@ void InitializeToolbar(HWND hwnd, HINSTANCE hInstance) {
 
 	SendMessage(g_toolbar, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
 	SendMessage(g_toolbar, TB_ADDBUTTONS, _countof(buttons), (LPARAM)buttons);
-}
 
-void CreateMenuBar(HWND hwnd) {
-	HMENU hMenu = CreateMenu();
-	HMENU hFileMenu = CreatePopupMenu();
-	HMENU hBookmarksMenu = CreatePopupMenu();
-	HMENU hToolsMenu = CreatePopupMenu();
+	// Subclass the toolbar for custom drawing
+	SetWindowSubclass(g_toolbar, [](HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
+		UINT_PTR uIdSubclass, DWORD_PTR dwRefData) -> LRESULT {
+			switch (uMsg) {
+			case WM_PAINT: {
+				PAINTSTRUCT ps;
+				HDC hdc = BeginPaint(hwnd, &ps);
 
-	AppendMenu(hFileMenu, MF_STRING, ID_FILE_NEW_TAB, "New Tab");
-	AppendMenu(hFileMenu, MF_STRING, ID_FILE_CLOSE_TAB, "Close Tab");
-	AppendMenu(hFileMenu, MF_SEPARATOR, 0, nullptr);
-	AppendMenu(hFileMenu, MF_STRING, ID_FILE_EXIT, "Exit");
+				// Create memory DC for double buffering
+				HDC memDC = CreateCompatibleDC(hdc);
+				HBITMAP memBitmap = CreateCompatibleBitmap(hdc, ps.rcPaint.right, ps.rcPaint.bottom);
+				HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, memBitmap);
 
-	AppendMenu(hBookmarksMenu, MF_STRING, ID_BOOKMARKS_ADD, "Add Bookmark");
-	AppendMenu(hBookmarksMenu, MF_STRING, ID_BOOKMARKS_VIEW, "View Bookmarks");
+				// Fill background
+				RECT rect;
+				GetClientRect(hwnd, &rect);
+				FillRect(memDC, &rect, (HBRUSH)GetStockObject(WHITE_BRUSH));
 
-	AppendMenu(hToolsMenu, MF_STRING, ID_TOOLS_DEVTOOLS, "Dingus Tools");
-	AppendMenu(hToolsMenu, MF_STRING, ID_TOOLS_DOWNLOADS, "Downloads");
+				// Draw each button
+				TBBUTTON button;
+				int buttonCount = SendMessage(hwnd, TB_BUTTONCOUNT, 0, 0);
+				for (int i = 0; i < buttonCount; i++) {
+					SendMessage(hwnd, TB_GETBUTTON, i, (LPARAM)&button);
+					RECT buttonRect;
+					SendMessage(hwnd, TB_GETITEMRECT, i, (LPARAM)&buttonRect);
 
-	AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFileMenu, "File");
-	AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hBookmarksMenu, "Bookmarks");
-	AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hToolsMenu, "Tools");
+					// Calculate icon position
+					int iconX = buttonRect.left + (buttonRect.right - buttonRect.left - ICON_SIZE) / 2;
+					int iconY = buttonRect.top + (buttonRect.bottom - buttonRect.top - ICON_SIZE) / 2;
 
-	SetMenu(hwnd, hMenu);
+					// Draw icon
+					auto it = g_iconPaths.find(button.idCommand);
+					if (it != g_iconPaths.end()) {
+						COLORREF iconColor = (i == g_hoveredButton) ? ICON_HOVER_COLOR : ICON_COLOR;
+						DrawIcon(memDC, it->second, iconX, iconY, iconColor);
+					}
+				}
+
+				// Copy from memory DC to window DC
+				BitBlt(hdc, 0, 0, ps.rcPaint.right, ps.rcPaint.bottom, memDC, 0, 0, SRCCOPY);
+
+				// Clean up
+				SelectObject(memDC, oldBitmap);
+				DeleteObject(memBitmap);
+				DeleteDC(memDC);
+
+				EndPaint(hwnd, &ps);
+				return 0;
+			}
+
+			case WM_MOUSEMOVE: {
+				POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+				int hot = SendMessage(hwnd, TB_HITTEST, 0, (LPARAM)&pt);
+				if (hot != g_hoveredButton) {
+					g_hoveredButton = hot;
+					InvalidateRect(hwnd, NULL, FALSE);
+
+					// Start hover timer if not already started
+					if (!g_toolbarHoverTimer) {
+						g_toolbarHoverTimer = SetTimer(hwnd, 1, 50, NULL);
+					}
+				}
+				break;
+			}
+
+			case WM_MOUSELEAVE: {
+				if (g_hoveredButton != -1) {
+					g_hoveredButton = -1;
+					InvalidateRect(hwnd, NULL, FALSE);
+				}
+				if (g_toolbarHoverTimer) {
+					KillTimer(hwnd, g_toolbarHoverTimer);
+					g_toolbarHoverTimer = 0;
+				}
+				break;
+			}
+			}
+			return DefSubclassProc(hwnd, uMsg, wParam, lParam);
+		}, 0, 0);
 }
 
 void CreateTab() {
@@ -182,12 +449,10 @@ void CreateTab() {
 	g_tabs.push_back(newTab);
 
 	int tabIndex = g_tabs.size() - 1;
-	
-	wchar_t tabText[] = L"New Tab";
 
-	TCITEMW tie = {0};
+	TCITEM tie;
 	tie.mask = TCIF_TEXT;
-	tie.pszText = tabText;
+	tie.pszText = (LPSTR)L"New Tab";
 	TabCtrl_InsertItem(g_tabControl, tabIndex, &tie);
 
 	InitializeWebView(tabIndex);
@@ -232,6 +497,25 @@ void ShowBookmarks() {
 		bookmarksList += bookmark.first + L"\n" + bookmark.second + L"\n";
 	}
 	MessageBoxW(g_hwnd, bookmarksList.c_str(), L"Bookmarks", MB_OK);
+}
+
+LRESULT CALLBACK UrlBarProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+	switch (uMsg) {
+	case WM_KEYDOWN:
+		if (wParam == VK_RETURN) {
+			HandleUrlBarInput();
+			return 0;
+		}
+		break;
+
+	case WM_PAINT:
+		DrawModernUrlBar(hwnd);
+		return 0;
+
+	case WM_NCPAINT:
+		return 0;
+	}
+	return DefSubclassProc(hwnd, uMsg, wParam, lParam);
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -448,27 +732,30 @@ void ResizeBrowser() {
 	RECT bounds;
 	GetClientRect(g_hwnd, &bounds);
 
+	// Add some padding for modern look
+	const int PADDING = 8;
+
 	// Position the toolbar
 	SendMessage(g_toolbar, TB_AUTOSIZE, 0, 0);
 
-	// Position the tab control
+	// Position the tab control with padding
 	SetWindowPos(g_tabControl, nullptr,
-		0, TOOLBAR_HEIGHT,
-		bounds.right, TAB_HEIGHT,
+		PADDING, TOOLBAR_HEIGHT,
+		bounds.right - (PADDING * 2), TAB_HEIGHT,
 		SWP_NOZORDER);
 
-	// Position the URL bar
+	// Position the URL bar with padding
 	SetWindowPos(g_urlBar, nullptr,
-		0, TOOLBAR_HEIGHT + TAB_HEIGHT,
-		bounds.right, URL_BAR_HEIGHT,
+		PADDING, TOOLBAR_HEIGHT + TAB_HEIGHT + (PADDING / 2),
+		bounds.right - (PADDING * 2), URL_BAR_HEIGHT,
 		SWP_NOZORDER);
 
-	// Calculate WebView bounds
+	// Calculate WebView bounds with padding
 	RECT webViewBounds = {
-		0,
-		TOOLBAR_HEIGHT + TAB_HEIGHT + URL_BAR_HEIGHT,
-		bounds.right,
-		bounds.bottom
+		PADDING,
+		TOOLBAR_HEIGHT + TAB_HEIGHT + URL_BAR_HEIGHT + PADDING,
+		bounds.right - PADDING,
+		bounds.bottom - PADDING
 	};
 
 	// Resize the WebView
@@ -476,12 +763,14 @@ void ResizeBrowser() {
 }
 
 void InitializeControls(HWND hwnd, HINSTANCE hInstance) {
-	// Create URL bar
+	WindowStyle::ApplyModernStyle(hwnd);
+
+	// Create URL bar with modern styling
 	g_urlBar = CreateWindowExW(
-		0,
+		0, // Remove WS_EX_CLIENTEDGE for modern look
 		L"EDIT",
 		L"",
-		WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+		WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
 		0, TOOLBAR_HEIGHT + TAB_HEIGHT,
 		WINDOW_WIDTH, URL_BAR_HEIGHT,
 		hwnd,
@@ -490,12 +779,29 @@ void InitializeControls(HWND hwnd, HINSTANCE hInstance) {
 		nullptr
 	);
 
-	// Create tab control
+	HFONT hFont = CreateFontW(
+		-14,              // Height
+		0,               // Width
+		0,               // Escapement
+		0,               // Orientation
+		FW_NORMAL,       // Weight
+		FALSE,           // Italic
+		FALSE,          // Underline
+		FALSE,          // StrikeOut
+		ANSI_CHARSET,   // CharSet
+		OUT_DEFAULT_PRECIS,          // OutPrecision
+		CLIP_DEFAULT_PRECIS,         // ClipPrecision
+		CLEARTYPE_QUALITY,           // Quality
+		DEFAULT_PITCH | FF_DONTCARE, // PitchAndFamily
+		L"Segoe UI"     // Modern font
+	);
+
+	// Create tab control with modern styling
 	g_tabControl = CreateWindowExW(
 		0,
-		WC_TABCONTROLW, 
+		WC_TABCONTROLW,
 		nullptr,
-		WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+		WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FLATBUTTONS | TCS_BUTTONS,
 		0, TOOLBAR_HEIGHT,
 		WINDOW_WIDTH, TAB_HEIGHT,
 		hwnd,
@@ -504,24 +810,15 @@ void InitializeControls(HWND hwnd, HINSTANCE hInstance) {
 		nullptr
 	);
 
-	// Set default font for URL bar and tab control
-	HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-	if (g_urlBar) SendMessage(g_urlBar, WM_SETFONT, (WPARAM)hFont, TRUE);
-	if (g_tabControl) SendMessage(g_tabControl, WM_SETFONT, (WPARAM)hFont, TRUE);
+	SendMessage(g_urlBar, WM_SETFONT, (WPARAM)hFont, TRUE);
+	SendMessage(g_tabControl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-	// Set up URL bar event handling
-	if (g_urlBar) {
-		SetWindowSubclass(g_urlBar, [](HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
-			UINT_PTR uIdSubclass, DWORD_PTR dwRefData) -> LRESULT {
-				if (uMsg == WM_KEYDOWN && wParam == VK_RETURN) {
-					if (g_currentTab >= 0 && g_currentTab < g_tabs.size()) {
-						NavigateToUrl(g_currentTab);
-					}
-					return 0;
-				}
-				return DefSubclassProc(hwnd, uMsg, wParam, lParam);
-			}, 0, 0);
-	}
+	// Set up modern tab control styling
+	DWORD extendedStyle = TCS_EX_FLATSEPARATORS;
+	SendMessage(g_tabControl, TCM_SETEXTENDEDSTYLE, 0, extendedStyle);
+
+	// Set up URL bar event handling with subclassing
+	SetWindowSubclass(g_urlBar, UrlBarProc, 0, 0);
 }
 
 void NavigateToUrl(int tabIndex) {
@@ -578,5 +875,11 @@ void NavigateToUrl(int tabIndex) {
 			L"Failed to navigate to the specified URL",
 			L"Navigation Error",
 			MB_OK | MB_ICONERROR);
+	}
+}
+
+void HandleUrlBarInput() {
+	if (g_currentTab >= 0 && g_currentTab < g_tabs.size()) {
+		NavigateToUrl(g_currentTab);
 	}
 }
