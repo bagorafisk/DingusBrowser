@@ -883,3 +883,43 @@ void HandleUrlBarInput() {
 		NavigateToUrl(g_currentTab);
 	}
 }
+
+void CreateMenuBar(HWND hwnd) {
+	HMENU hMenuBar = CreateMenu();
+	HMENU hFileMenu = CreatePopupMenu();
+	HMENU hBookmarksMenu = CreatePopupMenu();
+	HMENU hToolsMenu = CreatePopupMenu();
+
+	// File menu
+	AppendMenuW(hFileMenu, MF_STRING, ID_FILE_NEW_TAB, L"New Tab\tCtrl+T");
+	AppendMenuW(hFileMenu, MF_STRING, ID_FILE_CLOSE_TAB, L"Close Tab\tCtrl+W");
+	AppendMenuW(hFileMenu, MF_SEPARATOR, 0, nullptr);
+	AppendMenuW(hFileMenu, MF_STRING, ID_FILE_EXIT, L"Exit\tAlt+F4");
+	AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hFileMenu, L"File");
+
+	// Bookmarks menu
+	AppendMenuW(hBookmarksMenu, MF_STRING, ID_BOOKMARKS_ADD, L"Add Bookmark\tCtrl+D");
+	AppendMenuW(hBookmarksMenu, MF_STRING, ID_BOOKMARKS_VIEW, L"View Bookmarks\tCtrl+B");
+	AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hBookmarksMenu, L"Bookmarks");
+
+	// Tools menu
+	AppendMenuW(hToolsMenu, MF_STRING, ID_TOOLS_DEVTOOLS, L"Developer Tools\tF12");
+	AppendMenuW(hToolsMenu, MF_STRING, ID_TOOLS_DOWNLOADS, L"Downloads\tCtrl+J");
+	AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hToolsMenu, L"Tools");
+
+	// Set the menu bar
+	SetMenu(hwnd, hMenuBar);
+
+	// Set up accelerator keys
+	HACCEL hAccel = CreateAcceleratorTable(
+		(LPACCEL)new ACCEL[]{
+			{FVIRTKEY | FCONTROL, 'T', ID_FILE_NEW_TAB},
+			{FVIRTKEY | FCONTROL, 'W', ID_FILE_CLOSE_TAB},
+			{FVIRTKEY | FCONTROL, 'D', ID_BOOKMARKS_ADD},
+			{FVIRTKEY | FCONTROL, 'B', ID_BOOKMARKS_VIEW},
+			{FVIRTKEY | FCONTROL, 'J', ID_TOOLS_DOWNLOADS},
+			{FVIRTKEY, VK_F12, ID_TOOLS_DEVTOOLS}
+		},
+		6
+	);
+}
